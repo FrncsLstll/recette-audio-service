@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import requests
 from flask import Flask, request, jsonify
@@ -22,14 +23,82 @@ SUPPORTED_MIME = {
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB limite Groq Whisper
 
 
+def auth_check():
+    if AUTH_TOKEN and request.headers.get('X-Auth-Token') != AUTH_TOKEN:
+        return False
+    return True
+
+
 @app.route('/health')
 def health():
     return 'ok'
 
 
+@app.route('/subtitles', methods=['POST'])
+def get_subtitles():
+    """Récupère les sous-titres YouTube sans télécharger l'audio."""
+    if not auth_check():
+        return jsonify({'error': 'Non autorisé'}), 401
+
+    data = request.get_json(silent=True) or {}
+    url = data.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'URL manquante'}), 400
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ydl_opts = {
+            'skip_download': True,
+            'writeautomaticsub': True,
+            'writesubtitles': True,
+            'subtitleslangs': ['fr', 'fr-FR', 'en', 'en-US'],
+            'subtitlesformat': 'vtt',
+            'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 20,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            return jsonify({'error': f'Échec sous-titres: {str(e)}'}), 500
+
+        # Chercher le fichier .vtt téléchargé
+        vtt_file = None
+        for f in os.listdir(tmpdir):
+            if f.endswith('.vtt'):
+                vtt_file = os.path.join(tmpdir, f)
+                break
+
+        if not vtt_file:
+            return jsonify({'error': 'Aucun sous-titre disponible'}), 404
+
+        with open(vtt_file, 'r', encoding='utf-8') as f:
+            vtt_content = f.read()
+
+        # Nettoyer le format VTT → texte brut
+        lines = vtt_content.split('\n')
+        text_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('WEBVTT') or '-->' in line:
+                continue
+            if re.match(r'^\d+$', line):
+                continue
+            # Supprimer les balises HTML <c>, <b>, etc.
+            line = re.sub(r'<[^>]+>', '', line)
+            if line and line not in text_lines[-1:]:
+                text_lines.append(line)
+
+        transcript = ' '.join(text_lines).strip()
+        return jsonify({'transcript': transcript})
+
+
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
-    if AUTH_TOKEN and request.headers.get('X-Auth-Token') != AUTH_TOKEN:
+    """Télécharge l'audio et le transcrit avec Groq Whisper."""
+    if not auth_check():
         return jsonify({'error': 'Non autorisé'}), 401
 
     data = request.get_json(silent=True) or {}
