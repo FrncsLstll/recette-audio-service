@@ -1,5 +1,7 @@
 import os
 import re
+import base64
+import subprocess
 import tempfile
 import requests
 from flask import Flask, request, jsonify
@@ -155,6 +157,75 @@ def transcribe():
 
         transcript = resp.json().get('text', '')
         return jsonify({'transcript': transcript})
+
+
+@app.route('/frames', methods=['POST'])
+def extract_frames():
+    """Extrait des frames clés d'une vidéo pour lire le texte en surimpression."""
+    if not auth_check():
+        return jsonify({'error': 'Non autorisé'}), 401
+
+    data = request.get_json(silent=True) or {}
+    url = data.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'URL manquante'}), 400
+
+    # Vérifier que ffmpeg est disponible
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5, check=True)
+    except Exception:
+        return jsonify({'error': 'ffmpeg non disponible'}), 500
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Télécharger en qualité minimale (rapide, petit fichier)
+        ydl_opts = {
+            'format': 'worstvideo[ext=mp4]/worst[ext=mp4]/worstvideo/worst',
+            'outtmpl': os.path.join(tmpdir, 'video.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 30,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                duration = info.get('duration') or 60
+        except Exception as e:
+            return jsonify({'error': f'Téléchargement impossible: {str(e)}'}), 500
+
+        # Trouver le fichier vidéo téléchargé
+        video_file = None
+        for f in sorted(os.listdir(tmpdir)):
+            fp = os.path.join(tmpdir, f)
+            if os.path.isfile(fp):
+                video_file = fp
+                break
+
+        if not video_file:
+            return jsonify({'error': 'Aucune vidéo téléchargée'}), 500
+
+        # Extraire 4 frames (20%, 40%, 60%, 80% de la durée)
+        frames = []
+        for i, ratio in enumerate([0.2, 0.4, 0.6, 0.8]):
+            t = max(1, int(duration * ratio))
+            frame_path = os.path.join(tmpdir, f'frame_{i}.jpg')
+            try:
+                subprocess.run(
+                    ['ffmpeg', '-ss', str(t), '-i', video_file,
+                     '-vframes', '1', '-q:v', '4', '-vf', 'scale=720:-1',
+                     '-y', frame_path],
+                    capture_output=True, timeout=15, check=False
+                )
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                    with open(frame_path, 'rb') as f:
+                        frames.append(base64.b64encode(f.read()).decode('utf-8'))
+            except Exception:
+                continue
+
+        if not frames:
+            return jsonify({'error': 'Impossible d\'extraire des frames'}), 500
+
+        return jsonify({'frames': frames})
 
 
 if __name__ == '__main__':
