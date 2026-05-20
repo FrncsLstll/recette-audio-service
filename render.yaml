@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: recette-audio-service
-    runtime: python
-    buildCommand: apt-get install -y ffmpeg && pip install -r requirements.txt
-    startCommand: gunicorn app:app
