@@ -159,9 +159,9 @@ def transcribe():
         return jsonify({'transcript': transcript})
 
 
-@app.route('/thumbnail', methods=['POST'])
-def get_thumbnail():
-    """Récupère la miniature d'une vidéo Instagram pour analyse visuelle (sans télécharger la vidéo)."""
+@app.route('/frames', methods=['POST'])
+def extract_frames():
+    """Télécharge la vidéo et extrait des frames à différents moments pour lire le texte en surimpression."""
     if not auth_check():
         return jsonify({'error': 'Non autorisé'}), 401
 
@@ -170,39 +170,61 @@ def get_thumbnail():
     if not url:
         return jsonify({'error': 'URL manquante'}), 400
 
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return jsonify({'error': 'ffmpeg non disponible'}), 500
+
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Télécharger en qualité minimale
         ydl_opts = {
-            'skip_download': True,
-            'writethumbnail': True,
-            'outtmpl': os.path.join(tmpdir, 'thumb'),
+            'format': 'worstvideo[ext=mp4]/worst[ext=mp4]/worstvideo/worst',
+            'outtmpl': os.path.join(tmpdir, 'video.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'socket_timeout': 20,
+            'socket_timeout': 30,
         }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+                info = ydl.extract_info(url, download=True)
+                duration = info.get('duration') or 60
         except Exception as e:
-            return jsonify({'error': f'Impossible: {str(e)}'}), 500
+            return jsonify({'error': f'Téléchargement impossible: {str(e)}'}), 500
 
-        # Trouver le fichier miniature téléchargé
-        thumb_file = None
-        for f in os.listdir(tmpdir):
+        video_file = None
+        for f in sorted(os.listdir(tmpdir)):
             fp = os.path.join(tmpdir, f)
             if os.path.isfile(fp):
-                thumb_file = fp
+                video_file = fp
                 break
 
-        if not thumb_file:
-            return jsonify({'error': 'Pas de miniature disponible'}), 404
+        if not video_file:
+            return jsonify({'error': 'Aucune vidéo téléchargée'}), 500
 
-        with open(thumb_file, 'rb') as f:
-            b64 = base64.b64encode(f.read()).decode('utf-8')
+        # Extraire 4 frames (20%, 40%, 60%, 80% de la durée)
+        frames = []
+        for i, ratio in enumerate([0.2, 0.4, 0.6, 0.8]):
+            t = max(1, int(duration * ratio))
+            frame_path = os.path.join(tmpdir, f'frame_{i}.jpg')
+            try:
+                subprocess.run(
+                    [ffmpeg_exe, '-ss', str(t), '-i', video_file,
+                     '-vframes', '1', '-q:v', '4', '-vf', 'scale=720:-1',
+                     '-y', frame_path],
+                    capture_output=True, timeout=15, check=False
+                )
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                    with open(frame_path, 'rb') as f:
+                        frames.append(base64.b64encode(f.read()).decode('utf-8'))
+            except Exception:
+                continue
 
-        ext = os.path.splitext(thumb_file)[1].lstrip('.').lower() or 'jpg'
-        mime = f'image/{"jpeg" if ext == "jpg" else ext}'
-        return jsonify({'thumbnail': b64, 'mime': mime})
+        if not frames:
+            return jsonify({'error': 'Impossible d\'extraire des frames'}), 500
+
+        return jsonify({'frames': frames})
 
 
 if __name__ == '__main__':
