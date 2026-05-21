@@ -161,7 +161,7 @@ def transcribe():
 
 @app.route('/frames', methods=['POST'])
 def extract_frames():
-    """Télécharge la vidéo et extrait des frames à différents moments pour lire le texte en surimpression."""
+    """Extrait des frames du milieu de la vidéo pour lire le texte en surimpression."""
     if not auth_check():
         return jsonify({'error': 'Non autorisé'}), 401
 
@@ -177,19 +177,31 @@ def extract_frames():
         return jsonify({'error': 'ffmpeg non disponible'}), 500
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Télécharger en qualité minimale
+        # Étape 1 : récupérer la durée sans télécharger
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True, 'socket_timeout': 15}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                duration = info.get('duration') or 60
+        except Exception as e:
+            return jsonify({'error': f'Info vidéo impossible: {str(e)}'}), 500
+
+        # Étape 2 : télécharger uniquement le milieu de la vidéo (20% → 75%)
+        start_t = max(1, int(duration * 0.20))
+        end_t   = min(int(duration), int(duration * 0.75))
+
         ydl_opts = {
             'format': 'worstvideo[ext=mp4]/worst[ext=mp4]/worstvideo/worst',
             'outtmpl': os.path.join(tmpdir, 'video.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'socket_timeout': 30,
+            'socket_timeout': 20,
+            'download_ranges': yt_dlp.utils.download_range_func(None, [(start_t, end_t)]),
+            'force_keyframes_at_cuts': True,
         }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                duration = info.get('duration') or 60
+                ydl.download([url])
         except Exception as e:
             return jsonify({'error': f'Téléchargement impossible: {str(e)}'}), 500
 
@@ -203,17 +215,18 @@ def extract_frames():
         if not video_file:
             return jsonify({'error': 'Aucune vidéo téléchargée'}), 500
 
-        # Extraire 4 frames (20%, 40%, 60%, 80% de la durée)
+        # Étape 3 : extraire 3 frames (début, milieu, fin du clip)
+        clip_duration = end_t - start_t
         frames = []
-        for i, ratio in enumerate([0.2, 0.4, 0.6, 0.8]):
-            t = max(1, int(duration * ratio))
+        for i, ratio in enumerate([0.1, 0.5, 0.9]):
+            t = max(0, int(clip_duration * ratio))
             frame_path = os.path.join(tmpdir, f'frame_{i}.jpg')
             try:
                 subprocess.run(
                     [ffmpeg_exe, '-ss', str(t), '-i', video_file,
-                     '-vframes', '1', '-q:v', '4', '-vf', 'scale=720:-1',
+                     '-vframes', '1', '-q:v', '3', '-vf', 'scale=640:-1',
                      '-y', frame_path],
-                    capture_output=True, timeout=15, check=False
+                    capture_output=True, timeout=10, check=False
                 )
                 if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
                     with open(frame_path, 'rb') as f:
