@@ -179,10 +179,12 @@ def extract_frames():
     with tempfile.TemporaryDirectory() as tmpdir:
         # Étape 1 : récupérer l'URL directe de la vidéo sans télécharger
         video_url = None
+        video_duration = None
         try:
             ydl_opts = {'quiet': True, 'socket_timeout': 15, 'format': 'worstvideo[ext=mp4]/worst[ext=mp4]/worstvideo/worst'}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+                video_duration = info.get('duration')  # durée en secondes
                 # Chercher l'URL du format le plus léger avec vidéo
                 for fmt in sorted(info.get('formats', []), key=lambda x: x.get('filesize') or x.get('tbr') or 9999):
                     if fmt.get('vcodec') not in (None, 'none') and fmt.get('url'):
@@ -218,9 +220,24 @@ def extract_frames():
         if not os.path.exists(video_path) or os.path.getsize(video_path) < 10_000:
             return jsonify({'error': 'Fichier vidéo trop petit'}), 500
 
-        # Étape 3 : extraire 4 frames à 5s, 10s, 15s, 20s
+        # Étape 3 : calculer les timestamps couvrant toute la vidéo (dont la fin)
+        if video_duration and video_duration > 10:
+            d = float(video_duration)
+            # 6 frames réparties : début, quarts, et surtout la fin
+            timestamps = sorted(set([
+                max(2, int(d * 0.05)),
+                int(d * 0.20),
+                int(d * 0.40),
+                int(d * 0.60),
+                int(d * 0.80),
+                max(2, int(d * 0.95)),
+            ]))
+        else:
+            # Fallback : couvre jusqu'à ~50s
+            timestamps = [5, 15, 25, 35, 45]
+
         frames = []
-        for t in [5, 10, 15, 20]:
+        for t in timestamps:
             frame_path = os.path.join(tmpdir, f'frame_{t}.jpg')
             try:
                 subprocess.run(
