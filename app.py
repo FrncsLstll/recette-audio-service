@@ -161,7 +161,7 @@ def transcribe():
 
 @app.route('/frames', methods=['POST'])
 def extract_frames():
-    """Extrait des frames du milieu de la vidéo pour lire le texte en surimpression."""
+    """Récupère l'URL directe de la vidéo, télécharge seulement ~10 Mo, extrait des frames."""
     if not auth_check():
         return jsonify({'error': 'Non autorisé'}), 401
 
@@ -177,58 +177,59 @@ def extract_frames():
         return jsonify({'error': 'ffmpeg non disponible'}), 500
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Étape 1 : récupérer la durée sans télécharger
+        # Étape 1 : récupérer l'URL directe de la vidéo sans télécharger
+        video_url = None
         try:
-            with yt_dlp.YoutubeDL({'quiet': True, 'socket_timeout': 15}) as ydl:
+            ydl_opts = {'quiet': True, 'socket_timeout': 15, 'format': 'worstvideo[ext=mp4]/worst[ext=mp4]/worstvideo/worst'}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                duration = info.get('duration') or 60
+                # Chercher l'URL du format le plus léger avec vidéo
+                for fmt in sorted(info.get('formats', []), key=lambda x: x.get('filesize') or x.get('tbr') or 9999):
+                    if fmt.get('vcodec') not in (None, 'none') and fmt.get('url'):
+                        video_url = fmt['url']
+                        break
+                if not video_url:
+                    video_url = info.get('url')
         except Exception as e:
             return jsonify({'error': f'Info vidéo impossible: {str(e)}'}), 500
 
-        # Étape 2 : télécharger uniquement le milieu de la vidéo (20% → 75%)
-        start_t = max(1, int(duration * 0.20))
-        end_t   = min(int(duration), int(duration * 0.75))
+        if not video_url:
+            return jsonify({'error': 'URL vidéo non trouvée'}), 500
 
-        ydl_opts = {
-            'format': 'worstvideo[ext=mp4]/worst[ext=mp4]/worstvideo/worst',
-            'outtmpl': os.path.join(tmpdir, 'video.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 20,
-            'download_ranges': yt_dlp.utils.download_range_func(None, [(start_t, end_t)]),
-            'force_keyframes_at_cuts': True,
-        }
-
+        # Étape 2 : télécharger seulement les 12 premiers Mo (couvre ~20-30s à basse qualité)
+        video_path = os.path.join(tmpdir, 'video.mp4')
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+            resp = requests.get(
+                video_url,
+                headers={'Range': 'bytes=0-12582912'},  # 12 MB
+                timeout=25,
+                stream=True
+            )
+            with open(video_path, 'wb') as f:
+                downloaded = 0
+                for chunk in resp.iter_content(chunk_size=65536):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if downloaded >= 12_000_000:
+                        break
         except Exception as e:
-            return jsonify({'error': f'Téléchargement impossible: {str(e)}'}), 500
+            return jsonify({'error': f'Téléchargement partiel impossible: {str(e)}'}), 500
 
-        video_file = None
-        for f in sorted(os.listdir(tmpdir)):
-            fp = os.path.join(tmpdir, f)
-            if os.path.isfile(fp):
-                video_file = fp
-                break
+        if not os.path.exists(video_path) or os.path.getsize(video_path) < 10_000:
+            return jsonify({'error': 'Fichier vidéo trop petit'}), 500
 
-        if not video_file:
-            return jsonify({'error': 'Aucune vidéo téléchargée'}), 500
-
-        # Étape 3 : extraire 3 frames (début, milieu, fin du clip)
-        clip_duration = end_t - start_t
+        # Étape 3 : extraire 4 frames à 5s, 10s, 15s, 20s
         frames = []
-        for i, ratio in enumerate([0.1, 0.5, 0.9]):
-            t = max(0, int(clip_duration * ratio))
-            frame_path = os.path.join(tmpdir, f'frame_{i}.jpg')
+        for t in [5, 10, 15, 20]:
+            frame_path = os.path.join(tmpdir, f'frame_{t}.jpg')
             try:
                 subprocess.run(
-                    [ffmpeg_exe, '-ss', str(t), '-i', video_file,
+                    [ffmpeg_exe, '-ss', str(t), '-i', video_path,
                      '-vframes', '1', '-q:v', '3', '-vf', 'scale=640:-1',
                      '-y', frame_path],
                     capture_output=True, timeout=10, check=False
                 )
-                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 1000:
                     with open(frame_path, 'rb') as f:
                         frames.append(base64.b64encode(f.read()).decode('utf-8'))
             except Exception:
