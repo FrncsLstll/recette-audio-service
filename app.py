@@ -220,23 +220,24 @@ def extract_frames():
         if not os.path.exists(video_path) or os.path.getsize(video_path) < 10_000:
             return jsonify({'error': 'Fichier vidéo trop petit'}), 500
 
-        # Étape 3 : calculer les timestamps couvrant toute la vidéo (dont la fin)
+        # Étape 3 : timestamps concentrés sur la FIN de la vidéo (ingrédients souvent à la fin)
         if video_duration and video_duration > 10:
             d = float(video_duration)
-            # 6 frames réparties : début, quarts, et surtout la fin
-            timestamps = sorted(set([
-                max(2, int(d * 0.05)),
-                int(d * 0.20),
-                int(d * 0.40),
-                int(d * 0.60),
-                int(d * 0.80),
-                max(2, int(d * 0.95)),
-            ]))
+            # 2 frames de contexte (début + milieu)
+            context_ts = [max(2, int(d * 0.10)), int(d * 0.45)]
+            # Dernières 12 secondes : une frame toutes les 2s
+            end_start = max(d - 12, d * 0.65)
+            end_ts = []
+            t = end_start
+            while t < d - 0.5:
+                end_ts.append(max(2, int(t)))
+                t += 2.0
+            timestamps = sorted(set(context_ts + end_ts))
         else:
-            # Fallback : couvre jusqu'à ~50s
-            timestamps = [5, 15, 25, 35, 45]
+            timestamps = [3, 10, 20, 30, 40, 45]
 
         frames = []
+        frame_debug = []
         for t in timestamps:
             frame_path = os.path.join(tmpdir, f'frame_{t}.jpg')
             try:
@@ -249,13 +250,19 @@ def extract_frames():
                 if os.path.exists(frame_path) and os.path.getsize(frame_path) > 1000:
                     with open(frame_path, 'rb') as f:
                         frames.append(base64.b64encode(f.read()).decode('utf-8'))
+                    frame_debug.append(t)
             except Exception:
                 continue
 
         if not frames:
-            return jsonify({'error': 'Impossible d\'extraire des frames'}), 500
+            return jsonify({'error': 'Impossible d\'extraire des frames', 'duration': video_duration, 'timestamps_tried': timestamps}), 500
 
-        return jsonify({'frames': frames})
+        # Les frames sont dans l'ordre chronologique ; on renvoie aussi les métadonnées
+        return jsonify({
+            'frames': frames,
+            'duration': video_duration,
+            'timestamps': frame_debug,
+        })
 
 
 if __name__ == '__main__':
