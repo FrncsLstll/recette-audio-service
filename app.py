@@ -220,30 +220,38 @@ def extract_frames():
         if not os.path.exists(video_path) or os.path.getsize(video_path) < 10_000:
             return jsonify({'error': 'Fichier vidéo trop petit'}), 500
 
-        # Étape 3 : timestamps concentrés sur la FIN de la vidéo (ingrédients souvent à la fin)
+        # Étape 3 : extraction dense dans les DERNIÈRES 8 secondes (toutes les 0.5s)
         if video_duration and video_duration > 10:
             d = float(video_duration)
-            # 2 frames de contexte (début + milieu)
-            context_ts = [max(2, int(d * 0.10)), int(d * 0.45)]
-            # Dernières 12 secondes : une frame toutes les 2s
-            end_start = max(d - 12, d * 0.65)
+            # 2 frames de contexte
+            context_ts = [max(2.0, d * 0.10), d * 0.45]
+            # Dernières 8 secondes : une frame toutes les 0.5s
+            last_start = max(d - 8.0, d * 0.60)
             end_ts = []
-            t = end_start
-            while t < d - 0.5:
-                end_ts.append(max(2, int(t)))
-                t += 2.0
-            timestamps = sorted(set(context_ts + end_ts))
+            t = last_start
+            while t < d - 0.1 and len(end_ts) < 16:
+                end_ts.append(round(t, 1))
+                t += 0.5
+            all_ts = context_ts + end_ts
+            # Dédupliquer et trier
+            seen = set()
+            timestamps = []
+            for t in sorted(all_ts):
+                key = round(t, 1)
+                if key not in seen:
+                    seen.add(key)
+                    timestamps.append(t)
         else:
-            timestamps = [3, 10, 20, 30, 40, 45]
+            timestamps = [2, 8, 15, 25, 35, 42, 45]
 
         frames = []
         frame_debug = []
         for t in timestamps:
-            frame_path = os.path.join(tmpdir, f'frame_{t}.jpg')
+            frame_path = os.path.join(tmpdir, f'frame_{t:.1f}.jpg')
             try:
                 subprocess.run(
-                    [ffmpeg_exe, '-ss', str(t), '-i', video_path,
-                     '-vframes', '1', '-q:v', '3', '-vf', 'scale=640:-1',
+                    [ffmpeg_exe, '-ss', f'{t:.2f}', '-i', video_path,
+                     '-vframes', '1', '-q:v', '2', '-vf', 'scale=720:-1',
                      '-y', frame_path],
                     capture_output=True, timeout=10, check=False
                 )
